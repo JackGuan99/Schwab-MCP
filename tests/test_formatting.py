@@ -85,3 +85,21 @@ def test_empty_price_history():
         {"symbol": "X", "candles": [], "empty": True}, intraday=False, max_candles=10, label={"period": "1M"}
     )
     assert out == {"symbol": "X", "period": "1M", "candles_total": 0}
+
+
+def test_portfolio_summary_does_not_double_count_sweep_position():
+    # Schwab may report a money-market sweep both in balances and as a CASH_EQUIVALENT position.
+    account = {
+        "account": "****0001",
+        "balances": {"total_value": 1000, "cash_balance": 0, "money_market_fund": 300},
+        "positions": [
+            {"symbol": "VTI", "asset_type": "COLLECTIVE_INVESTMENT", "market_value": 700},
+            {"symbol": "SWVXX", "asset_type": "CASH_EQUIVALENT", "market_value": 300},
+        ],
+        "positions_count": 2,
+    }
+    s = fmt.portfolio_summary([account])
+    assert s["total_value"] == 1000 and s["cash_and_sweep"] == 300 and s["invested_value"] == 700
+    allocation = {row["asset_type"]: row["pct"] for row in s["allocation_by_asset_type"]}
+    assert allocation == {"COLLECTIVE_INVESTMENT": 70.0, "CASH_EQUIVALENT": 30.0}
+    assert sum(allocation.values()) == 100

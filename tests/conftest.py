@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -319,6 +320,30 @@ PRICE_HISTORY = {
     ],
 }
 
+
+def trend_history(bars: int = 300) -> dict[str, Any]:
+    """Daily candles for an uptrend with a 44-bar oscillation (enough bars for SMA200)."""
+    candles = []
+    for i in range(bars):
+        close = 100 + 0.2 * i + 5 * math.sin(i / 7)
+        candles.append(
+            {
+                "open": close - 0.5,
+                "high": close + 1,
+                "low": close - 1,
+                "close": close,
+                "volume": 1_000_000,
+                "datetime": 1733202000000 + i * 86_400_000,  # 2024-12-03 00:00 US/Eastern
+            }
+        )
+    return {"symbol": "TREND", "empty": False, "candles": candles}
+
+
+SPECIAL_HISTORY = {
+    "TREND": trend_history(),
+    "EMPTY": {"symbol": "EMPTY", "empty": True, "candles": []},
+}
+
 OPTION_CHAIN = {
     "symbol": "AAPL",
     "status": "SUCCESS",
@@ -406,7 +431,6 @@ class FakeSchwab:
             f"/trader/v1/accounts/{HASH_A}/orders": ORDERS,
             f"/trader/v1/accounts/{HASH_A}/transactions": TRANSACTIONS[HASH_A],
             f"/trader/v1/accounts/{HASH_B}/transactions": TRANSACTIONS[HASH_B],
-            "/marketdata/v1/pricehistory": PRICE_HISTORY,
             "/marketdata/v1/chains": OPTION_CHAIN,
             "/marketdata/v1/expirationchain": {
                 "expirationList": [
@@ -444,6 +468,11 @@ class FakeSchwab:
                 ]
             },
         }
+        if path == "/marketdata/v1/pricehistory":
+            symbol = params.get("symbol")
+            if symbol == "BAD":
+                return httpx.Response(400, json={"errors": [{"detail": "Invalid symbol BAD"}]})
+            return httpx.Response(200, json=SPECIAL_HISTORY.get(symbol, PRICE_HISTORY))
         if path == "/marketdata/v1/quotes":
             symbols = params.get("symbols", "").split(",")
             body: dict[str, Any] = {s: QUOTES[s] for s in symbols if s in QUOTES}

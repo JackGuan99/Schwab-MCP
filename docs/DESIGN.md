@@ -15,6 +15,7 @@ agent (Claude / GPT)
 server.py      工具定义、参数校验（pydantic / JSON Schema）、错误翻译
    │
    ├── formatting.py   原始 JSON → 精简、派生好的字典（纯函数）
+   ├── indicators.py   K 线 → 技术指标（纯函数）
    ├── accounts.py     账号 ↔ hash 映射、脱敏、按尾号/昵称解析
    └── client.py       httpx 异步客户端，只有 GET；401 自动刷新，429/5xx 退避重试
           │
@@ -31,7 +32,8 @@ server.py      工具定义、参数校验（pydantic / JSON Schema）、错误�
 | `client.py` | Trader API 和 Market Data API 的只读端点；日期格式（ISO `…000Z`、epoch 毫秒）集中在这里处理 |
 | `accounts.py` | `/accounts/accountNumbers` + `/userPreference`（昵称）→ `Account`；`scrub()` 递归替换所有残留的完整账号 |
 | `formatting.py` | 持仓派生（成本、浮盈亏 %、仓位占比、期权 ×100 乘数、空头方向）、组合汇总、报价/K 线/期权链/订单/流水的精简 |
-| `server.py` | 14 个工具 + 1 个 prompt；`lifespan` 里创建共享的 httpx 客户端 |
+| `indicators.py` | SMA / EMA / RSI / MACD / 布林带 / ATR / 已实现波动率、交叉检测，以及单个标的的技术面快照 |
+| `server.py` | 15 个工具 + 1 个 prompt；`lifespan` 里创建共享的 httpx 客户端 |
 | `cli.py` | `auth` / `status` / `serve`，以及 HTTP 模式的 Bearer 中间件 |
 
 ## 关键设计决策
@@ -48,6 +50,8 @@ schwab-py 很成熟，但它的体量主要花在交易、订单构造和流式�
 
 ### 3. 面向 LLM 的输出
 - **预先派生**：成本 = 市值 − 浮盈；浮盈 %、仓位占比、组合配置、跨账户合并同一代码。LLM 算术不可靠，这些由代码来算。
+- **现金用差额算**：组合汇总里的现金 = 账户总值 − 所有持仓市值，而不是 `cashBalance + moneyMarketFund`。
+  Schwab 可能把 sweep / 货币基金同时报成余额和一个 `CASH_EQUIVALENT` 持仓，直接相加会重复计算，资产配置合计超过 100%。
 - **精简**：去掉 null 和空容器，数字按类型取整（金额 2 位，其余 4 位），字段一律 snake_case，`_pct` 后缀表示百分数。
 - **可截断**：K 线默认只返回最近 120 根（摘要仍覆盖全区间），期权链默认 80 个合约，超出时明确告诉模型如何缩小范围。
 - **统一时间**：时间戳全部转换为美东时间（交易所时钟），另提供 `get_current_time`，避免模型自己猜"今天"。
@@ -66,17 +70,28 @@ Schwab：access token 30 分钟，refresh token 自**首次登录**起 7 天，�
 - 登录采用"粘贴回调 URL"的手动流程（同 schwab-py 的 manual flow）：不需要在本机起 HTTPS 服务、不需要自签证书，
   在无图形界面的服务器上也能用。
 
-### 6. 传输与部署
+### 6. 技术指标在服务端计算（借鉴 jkoelker/schwab-mcp 的 technical 工具）
+"RSI 是多少""是不是跌破了 200 日线"这类问题，如果让模型从几百根 K 线里自己算，既费 token 又容易出错。
+`get_technical_indicators` 取 2 年日线（或 10 年周线），只返回最新值和几个可以直接引用的事实（与均线的偏离、
+MACD / 均线最近一次交叉的日期、52 周区间位置）。口径与主流看盘软件一致：EMA 用前 n 根的 SMA 做种子，
+RSI 和 ATR 用 Wilder 平滑，布林带用总体标准差；RSI 的实现用 StockCharts 公开的算例逐值校验过。
+多个代码并发请求，但限制并发数为 4，避免触发 Schwab 约 120 次/分钟的频率限制。
+
+### 7. 传输与部署
 - 默认 stdio：Claude Desktop、Claude Code、Codex CLI、OpenAI Agents SDK 都支持，数据不经过网络监听端口。
 - HTTP（Streamable HTTP，`/mcp`）用于 OpenAI Responses API 这类只能连远程 MCP 的场景：强制 Bearer token（`hmac.compare_digest`
   比较），不配 token 就拒绝启动；绑定回环地址时保留 SDK 的 DNS rebinding 防护，通过 `--allowed-host` 放行隧道域名。
+- Docker：两阶段构建（uv 安装锁定的依赖 → 精简运行镜像），非 root 用户运行；`XDG_CONFIG_HOME=/config`，
+  token 放在命名卷里，`auth` 和 server 两个容器共享，热加载依然有效。基础镜像只用 Docker Hub 的官方 `python`，
+  uv 从 PyPI 安装，不依赖 GHCR。
 
 ## 参考项目
 
 | 项目 | 借鉴点 | 不同之处 |
 |---|---|---|
-| [jkoelker/schwab-mcp](https://github.com/jkoelker/schwab-mcp) | `auth` / `server` 两段式 CLI；`https://127.0.0.1:8182` 默认回调；去掉空字段以节省 token 的 `--json` 模式；stdio + HTTP 两种传输；工具按"行情 / 账户"分组 | 它支持交易（Discord 审批，另有绕过审批的开关）；本项目完全不含交易 |
+| [jkoelker/schwab-mcp](https://github.com/jkoelker/schwab-mcp) | `auth` / `server` 两段式 CLI；`https://127.0.0.1:8182` 默认回调；去掉空字段以节省 token 的 `--json` 模式；stdio + HTTP 两种传输；工具按"行情 / 账户"分组；服务端技术指标；容器镜像 + token 卷 | 它支持交易（Discord 审批，另有绕过审批的开关）；本项目完全不含交易 |
 | [sudowealth/schwab-mcp](https://github.com/sudowealth/schwab-mcp) | 账号脱敏（用显示名替代账号）；日志中的密钥脱敏；token 在过期前主动刷新 | 它部署在 Cloudflare Workers + Durable Objects 上，由服务端托管 OAuth；本项目是本地优先的单用户进程 |
+| [acidsolution/schwab-mcp-server](https://github.com/acidsolution/schwab-mcp-server) | 同样坚持只读；给出 Claude / ChatGPT / Codex 等多种客户端的配置示例 | 工具更少，没有组合汇总和账号脱敏 |
 | [alexgolec/schwab-py](https://github.com/alexgolec/schwab-py) | OAuth 端点与 Basic 认证方式、授权码需 URL 解码、各端点参数名、日期格式、`Approved - Pending` 状态等注意事项 | 本项目只实现只读子集，没有把它作为依赖 |
 
 ## 可能的后续工作
@@ -84,4 +99,4 @@ Schwab：access token 30 分钟，refresh token 自**首次登录**起 7 天，�
 - 可选的 WebSocket 流式报价（Schwab Streamer），作为 MCP resource 订阅
 - 更多派生分析：行业/板块暴露（需要额外数据源）、已实现盈亏统计、分红日历
 - `schwab-mcp auth --local-server`：自签证书本地回调，免去粘贴 URL
-- Docker 镜像（token 目录挂载为 volume）
+- 在 CI 里发布镜像到容器仓库（目前只在 CI 里构建和冒烟测试）

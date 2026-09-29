@@ -216,3 +216,27 @@ async def test_expired_login_gives_actionable_error(make_client, settings):
         status = payload(await client.call_tool("get_auth_status", {}))
     assert result.is_error and "schwab-mcp auth" in result.content[0].text
     assert status["authenticated"] is False and "expired" in status["warning"]
+
+
+async def test_technical_indicators(make_client, fake):
+    async with make_client() as client:
+        data = payload(await client.call_tool("get_technical_indicators", {"symbols": "trend, empty, bad"}))
+        weekly = payload(
+            await client.call_tool("get_technical_indicators", {"symbols": ["TREND"], "interval": "weekly"})
+        )
+        all_bad = await client.call_tool("get_technical_indicators", {"symbols": ["BAD"]})
+        too_many = await client.call_tool(
+            "get_technical_indicators", {"symbols": [f"S{i}" for i in range(26)]}
+        )
+    trend = data["indicators"]["TREND"]
+    assert trend["bars"] == 300 and trend["trend"]["sma50_above_sma200"] is True
+    assert set(data["indicators"]) == {"TREND"}
+    assert data["errors"]["EMPTY"].startswith("Not enough price history")
+    assert "Invalid symbol BAD" in data["errors"]["BAD"]
+    assert weekly["indicators"]["TREND"]["interval"] == "weekly"
+    assert all_bad.is_error and "Invalid symbol BAD" in all_bad.content[0].text
+    assert too_many.is_error and "At most 25" in too_many.content[0].text
+    history = [r.url.params for r in fake.requests if r.url.path == "/marketdata/v1/pricehistory"]
+    daily = next(p for p in history if p["symbol"] == "TREND" and p["frequencyType"] == "daily")
+    assert (daily["periodType"], daily["period"], daily["frequency"]) == ("year", "2", "1")
+    assert any(p["frequencyType"] == "weekly" and p["period"] == "10" for p in history)

@@ -20,3 +20,13 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t schwab-mcp .
+      - run: docker run --rm schwab-mcp --version
+      - name: Server refuses unauthenticated HTTP
+        run: |
+          ! docker run --rm -e SCHWAB_CLIENT_ID=x -e SCHWAB_CLIENT_SECRET=y schwab-mcp serve --transport http

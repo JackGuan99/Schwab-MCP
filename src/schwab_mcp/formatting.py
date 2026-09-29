@@ -220,13 +220,28 @@ def attach_quotes(positions: list[dict[str, Any]], quotes: dict[str, dict[str, A
         )
 
 
+def uninvested_cash(account: dict[str, Any]) -> float:
+    """Cash not held as a position: account value minus the market value of all positions.
+
+    Using the residual (instead of adding cashBalance and moneyMarketFund) avoids counting a
+    sweep / money-market fund twice when Schwab reports it both as a balance and as a position.
+    """
+    balances = account.get("balances", {})
+    total = balances.get("total_value")
+    if total is None:
+        return (balances.get("cash_balance") or 0) + (balances.get("money_market_fund") or 0)
+    return total - sum(p.get("market_value") or 0 for p in account.get("positions", []))
+
+
 def portfolio_summary(accounts: list[dict[str, Any]], *, top_n: int = 10) -> dict[str, Any]:
     """Aggregate already-formatted accounts (from :func:`format_account`)."""
     total = sum(a.get("balances", {}).get("total_value", 0) or 0 for a in accounts)
-    cash = sum(
-        (a.get("balances", {}).get("cash_balance", 0) or 0)
-        + (a.get("balances", {}).get("money_market_fund", 0) or 0)
+    residual_cash = sum(uninvested_cash(a) for a in accounts)
+    cash = residual_cash + sum(
+        p.get("market_value") or 0
         for a in accounts
+        for p in a.get("positions", [])
+        if p.get("asset_type") == "CASH_EQUIVALENT"
     )
     day_pl = 0.0
     unrealized = 0.0
@@ -258,8 +273,8 @@ def portfolio_summary(accounts: list[dict[str, Any]], *, top_n: int = 10) -> dic
             agg["day_pl"] += pos.get("day_pl") or 0
             agg["accounts"].append(acct.get("account"))
 
-    if cash:
-        by_type["CASH_AND_SWEEP"] += cash
+    if abs(residual_cash) >= 0.005:  # ignore float dust from the subtraction
+        by_type["CASH_AND_SWEEP"] += residual_cash
     allocation = [
         {"asset_type": k, "market_value": money(v), "pct": pct(v, total)}
         for k, v in sorted(by_type.items(), key=lambda kv: -abs(kv[1]))

@@ -16,7 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from . import __version__
+from . import __version__, indicators
 from . import formatting as fmt
 from .accounts import AccountDirectory, AccountNotFound
 from .auth import AuthError, TokenManager, TokenStore
@@ -30,6 +30,8 @@ Read-only access to the user's Charles Schwab brokerage accounts and Schwab mark
 
 - Start with get_portfolio_summary for "how is my portfolio doing" questions, get_positions for holdings
   detail (pass include_quotes=true for live prices), and get_quotes for real-time prices.
+- For moving averages, RSI, MACD, volatility and similar, call get_technical_indicators instead of
+  computing them from get_price_history candles yourself.
 - Accounts are shown as masked labels such as ****1234; pass that label, the last digits, or the
   account nickname wherever a tool takes `account`. Omit `account` to cover all accounts.
 - Money is in USD. Timestamps are US/Eastern unless marked UTC. Fields ending in _pct are percents
@@ -42,6 +44,13 @@ READ_ONLY = ToolAnnotations(
     read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True
 )
 QUOTE_CHUNK = 100
+MAX_TECHNICAL_SYMBOLS = 25
+HISTORY_CONCURRENCY = 4
+# interval -> price-history request that yields enough bars for a 200-period SMA plus a 52-week range
+TECHNICAL_HISTORY: dict[str, dict[str, Any]] = {
+    "daily": {"period_type": "year", "period": 2, "frequency_type": "daily", "frequency": 1},
+    "weekly": {"period_type": "year", "period": 10, "frequency_type": "weekly", "frequency": 1},
+}
 
 
 @dataclass
@@ -507,6 +516,54 @@ def create_server(
                 extended_hours=extended_hours if intraday else None,
             )
             return fmt.format_price_history(raw, intraday=intraday, max_candles=max_candles, label=label)
+
+    @mcp.tool(annotations=READ_ONLY)
+    async def get_technical_indicators(
+        ctx: Context,
+        symbols: Annotated[
+            list[str] | str,
+            Field(description=f'Up to {MAX_TECHNICAL_SYMBOLS} tickers, e.g. ["AAPL", "SPY"] or "AAPL,MSFT".'),
+        ],
+        interval: Annotated[
+            Literal["daily", "weekly"],
+            Field(description="Candle size the indicators are computed on (daily uses 2 years of bars)."),
+        ] = "daily",
+    ) -> dict[str, Any]:
+        """Technical snapshot per symbol, computed server-side from price history: SMA 20/50/200 and
+        distance from them, RSI(14), MACD(12,26,9) with last crossover, Bollinger(20,2), ATR(14),
+        returns over 1w-1y, realized volatility, 52-week range and golden/death cross state."""
+        a = app(ctx)
+        with tool_errors():
+            syms = _as_list(symbols)
+            if not syms:
+                raise ValueError("Provide at least one symbol.")
+            if len(syms) > MAX_TECHNICAL_SYMBOLS:
+                raise ValueError(f"At most {MAX_TECHNICAL_SYMBOLS} symbols per call.")
+            gate = asyncio.Semaphore(HISTORY_CONCURRENCY)
+
+            async def one(sym: str) -> dict[str, Any]:
+                async with gate:
+                    raw = await a.client.get_price_history(sym, **TECHNICAL_HISTORY[interval])
+                return indicators.technical_summary(raw, interval=interval)
+
+            results = await asyncio.gather(*(one(s) for s in syms), return_exceptions=True)
+            failures = [r for r in results if isinstance(r, BaseException)]
+            # Login problems, bugs, or every symbol failing the same way: one clear tool error.
+            for exc in failures:
+                if not isinstance(exc, SchwabAPIError) or len(failures) == len(syms):
+                    raise exc
+            out: dict[str, Any] = {"as_of": fmt.now_eastern().isoformat(timespec="seconds"), "indicators": {}}
+            errors: dict[str, str] = {}
+            for sym, result in zip(syms, results, strict=True):
+                if isinstance(result, BaseException):
+                    errors[sym] = str(result)
+                elif "error" in result:
+                    errors[sym] = result["error"]
+                else:
+                    out["indicators"][sym] = result
+            if errors:
+                out["errors"] = errors
+            return out
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_option_chain(
