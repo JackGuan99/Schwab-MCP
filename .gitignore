@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+token.json
+*.token.json
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

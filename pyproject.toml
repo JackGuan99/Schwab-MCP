@@ -1,0 +1,50 @@
+[project]
+name = "schwab-mcp"
+version = "0.1.0"
+description = "Read-only Model Context Protocol server for Charles Schwab: positions, balances and real-time quotes for AI agents."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Tujie Guan" }]
+keywords = ["mcp", "schwab", "brokerage", "llm", "agent", "claude", "portfolio"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "mcp>=2.2,<3",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "uvicorn>=0.31",
+    "tzdata; sys_platform == 'win32'",
+]
+
+[project.scripts]
+schwab-mcp = "schwab_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/schwab_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
